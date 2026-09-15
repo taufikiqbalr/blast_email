@@ -1,4 +1,4 @@
-# ITTS Blast Email (Node.js + Gmail API)
+# ITTS Blast Email (Node.js + SMTP/Nodemailer)
 
 Utility untuk mengirim email PMB ITTS secara terkontrol dari file CSV. Program ini dibuat untuk format data `Daftar Sisa Pendaftar` ITTS (metadata di tiga baris awal, delimiter `;`) tetapi juga menerima CSV biasa yang memiliki kolom `Email`.
 
@@ -7,12 +7,13 @@ Utility untuk mengirim email PMB ITTS secara terkontrol dari file CSV. Program i
 - Validasi format email dan deteksi duplikat sebelum pengiriman.
 - Personalisasi nama dan status pendaftar (`Pendaftar` / `Lolos Seleksi`).
 - Template HTML responsif + versi plain text.
-- Gmail API dengan OAuth2 atau Google Workspace Service Account + Domain-Wide Delegation.
+- Pengiriman melalui SMTP menggunakan Nodemailer.
+- Cocok untuk Google Workspace/Gmail SMTP dengan App Password.
 - `preview` dan `test email` sebelum blast.
 - `DRY_RUN=true` sebagai default agar tidak ada pengiriman tak sengaja.
 - Delay antar email, suppression list, dan log `sent/failed` untuk mencegah pengiriman ganda saat proses dilanjutkan.
 - `List-Unsubscribe` via email dan instruksi opt-out di footer.
-- Data recipient dan Google credential tidak pernah perlu disimpan di repository.
+- CSV recipient dan SMTP password tidak perlu disimpan di repository.
 
 ## 1. Persiapan
 
@@ -23,11 +24,11 @@ npm install
 cp .env.example .env
 ```
 
-**Jangan commit `.env`, file key Google, atau CSV pendaftar asli.** Repository ini mengabaikannya melalui `.gitignore`.
+**Jangan commit `.env`, password SMTP/App Password, atau CSV pendaftar asli.** Repository ini mengabaikannya melalui `.gitignore`.
 
 ## 2. Letakkan file recipient
 
-Contoh paling aman:
+Contoh:
 
 ```text
 data/recipients.csv
@@ -37,38 +38,29 @@ File produksi tidak akan masuk Git karena `data/*.csv` di-ignore, kecuali file c
 
 CSV ITTS saat ini dapat dibaca langsung, termasuk tiga baris metadata sebelum header.
 
-## 3. Konfigurasi Google/Gmail
-
-### Opsi A — OAuth2 (direkomendasikan untuk mailbox biasa)
+## 3. Konfigurasi SMTP Gmail / Google Workspace
 
 Isi `.env`:
 
 ```dotenv
-GOOGLE_AUTH_MODE=oauth2
-SENDER_EMAIL=pmb@itts.ac.id
-GMAIL_CLIENT_ID=...
-GMAIL_CLIENT_SECRET=...
-GMAIL_REFRESH_TOKEN=...
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_REQUIRE_TLS=true
+SMTP_USERNAME=pelatihan@itts.ac.id
+SMTP_PASSWORD=ISI_APP_PASSWORD_BARU_DI_SINI
+
+SENDER_EMAIL=pelatihan@itts.ac.id
+SENDER_NAME=PMB Institut Teknologi Tangerang Selatan
+REPLY_TO_EMAIL=pelatihan@itts.ac.id
+UNSUBSCRIBE_EMAIL=pelatihan@itts.ac.id
 ```
 
-OAuth consent harus memiliki scope:
+Untuk port `587`, Nodemailer menggunakan STARTTLS (`SMTP_SECURE=false`, `SMTP_REQUIRE_TLS=true`). Untuk Google Workspace/Gmail, gunakan **App Password**, bukan password login utama akun.
 
-```text
-https://www.googleapis.com/auth/gmail.send
-```
+Jika App Password ditampilkan Google dengan spasi per empat karakter, program otomatis menghapus whitespace ketika host adalah `smtp.gmail.com`.
 
-### Opsi B — Service Account
-
-Untuk Google Workspace, service account harus diberi **Domain-Wide Delegation** oleh administrator Workspace dan diizinkan untuk scope `gmail.send`. Service account kemudian mengimpersonasi mailbox pengirim.
-
-```dotenv
-GOOGLE_AUTH_MODE=service_account
-GOOGLE_SERVICE_ACCOUNT_KEY_FILE=./credentials.json
-GMAIL_IMPERSONATED_USER=pmb@itts.ac.id
-SENDER_EMAIL=pmb@itts.ac.id
-```
-
-Service account Gmail **tidak dapat mengirim sebagai dirinya sendiri**; ia harus mengimpersonasi user Workspace yang sah.
+Jika `SENDER_EMAIL` berbeda dari `SMTP_USERNAME`, pastikan alamat tersebut sudah dikonfigurasi sebagai alias pengirim yang diizinkan. Jika tidak, gunakan alamat yang sama dengan `SMTP_USERNAME`.
 
 ## 4. Validasi recipient
 
@@ -76,7 +68,7 @@ Service account Gmail **tidak dapat mengirim sebagai dirinya sendiri**; ia harus
 npm run validate -- --file ./data/recipients.csv
 ```
 
-Output menampilkan jumlah baris, email valid unik, invalid, dan duplikat. Validasi ini adalah validasi format/sintaks; bukan verifikasi bahwa mailbox benar-benar aktif.
+Output menampilkan jumlah baris, email valid unik, invalid, dan duplikat. Validasi ini memeriksa format/sintaks; bukan memastikan mailbox tujuan benar-benar aktif.
 
 ## 5. Preview template
 
@@ -88,24 +80,19 @@ File `preview.html` akan dibuat di root project. Buka di browser dan periksa cop
 
 ## 6. Kirim satu test email
 
-Biarkan `DRY_RUN=true` saat validasi dan preview. Setelah siap mengirim test:
+Ubah sementara:
 
 ```dotenv
 DRY_RUN=false
-TEST_EMAIL=email-anda@contoh.com
 ```
 
-Lalu:
-
-```bash
-npm run send -- --file ./data/recipients.csv
-```
-
-Atau tanpa menyimpan `TEST_EMAIL`:
+Lalu jalankan:
 
 ```bash
 npm run send -- --file ./data/recipients.csv --test-email email-anda@contoh.com
 ```
+
+Program akan menjalankan `transporter.verify()` terlebih dahulu. Jika autentikasi SMTP gagal, blast tidak dimulai.
 
 ## 7. Blast ke seluruh recipient
 
@@ -117,7 +104,7 @@ CONFIRM_SEND=YES
 SEND_DELAY_MS=1500
 ```
 
-Pastikan `TEST_EMAIL` dikosongkan, kemudian:
+Kemudian:
 
 ```bash
 npm run send -- --file ./data/recipients.csv
@@ -154,14 +141,14 @@ Default template berisi:
 
 - PMB Tahun Akademik 2026/2027 hingga **30 September 2026**.
 - Program Studi **Sistem Informasi, Teknologi Informasi, dan Informatika**.
-- Kode promo **ITTS08**, potongan hingga **Rp2.000.000**, dengan keterangan bahwa promo tunduk pada syarat, kuota, dan masa berlaku PMB.
+- Kode promo **ITTS08**, potongan hingga **Rp2.000.000**, dengan keterangan promo tunduk pada syarat, kuota, dan masa berlaku PMB.
 - Tagline **“Study From The Experts!”** dan **“Membangun Generasi Digital yang Kompeten dan Berintegritas.”**
-- Informasi program **“Dijamin Kerja Sebelum Lulus”** ditulis dengan arahan untuk mengonfirmasi syarat dan ketentuannya kepada PMB.
+- Informasi program **“Dijamin Kerja Sebelum Lulus”** dengan arahan untuk mengonfirmasi syarat dan ketentuannya kepada PMB.
 - CTA menuju `https://registrasi.itts.ac.id` dan WhatsApp PMB.
 
 Seluruh item utama dapat diganti melalui `.env` tanpa mengubah source code.
 
-> Catatan promo: informasi publik ITTS yang terindeks menyebut PMB Gelombang III sampai 30 September 2026, sedangkan publikasi kode ITTS08 yang ditemukan menyebut periode voucher 1–31 Agustus 2026. Karena itu, konfirmasikan terlebih dahulu apakah ITTS08 sudah diperpanjang sebelum live blast pada September 2026.
+> Catatan promo: sebelum live blast, pastikan kembali bahwa kode promo `ITTS08` masih berlaku sampai tanggal pengiriman kampanye.
 
 ## Struktur
 
@@ -181,4 +168,4 @@ Seluruh item utama dapat diganti melalui `.env` tanpa mengubah source code.
 
 ## Catatan operasional
 
-Gunakan mailbox institusi yang sah dan hanya hubungi pendaftar yang memang berhak menerima komunikasi PMB. Hormati permintaan berhenti menerima email dan masukkan alamat tersebut ke suppression list. Jangan menaruh credential Google, recipient CSV, atau log pengiriman ke repository publik.
+Gunakan mailbox institusi yang sah dan hanya hubungi pendaftar yang memang berhak menerima komunikasi PMB. Hormati permintaan berhenti menerima email dan masukkan alamat tersebut ke suppression list. Jangan menaruh credential SMTP, recipient CSV, atau log pengiriman ke repository publik.
