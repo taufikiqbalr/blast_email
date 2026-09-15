@@ -1,0 +1,20 @@
+{
+  "name": "itts-blast-email",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Safe Gmail API email blast utility for PMB ITTS campaigns.",
+  "type": "module",
+  "scripts": {
+    "validate": "node src/index.js validate",
+    "preview": "node src/index.js preview",
+    "send": "node src/index.js send"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "csv-parse": "^7.0.2",
+    "dotenv": "^17.4.2",
+    "googleapis": "^180.0.0"
+  }
+}
