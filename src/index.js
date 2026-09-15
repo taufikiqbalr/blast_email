@@ -2,7 +2,7 @@ import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse } from 'csv-parse/sync';
-import { google } from 'googleapis';
+import nodemailer from 'nodemailer';
 import { renderEmail } from './template.js';
 
 const EMAIL_RE = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/i;
@@ -115,95 +115,53 @@ function appendLog(filePath, entry) {
   fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`, 'utf8');
 }
 
-function encodeHeader(value) {
-  return `=?UTF-8?B?${Buffer.from(String(value), 'utf8').toString('base64')}?=`;
-}
-
-function base64Url(value) {
-  return Buffer.from(value, 'utf8')
-    .toString('base64')
-    .replaceAll('+', '-')
-    .replaceAll('/', '_')
-    .replace(/=+$/g, '');
-}
-
-function sanitizeHeader(value) {
-  return String(value || '').replace(/[\r\n]+/g, ' ').trim();
-}
-
-function buildRawMessage({ recipient, subject, html, text, senderName, senderEmail, replyTo, unsubscribeEmail }) {
-  const boundary = `itts_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const headers = [
-    `From: ${encodeHeader(sanitizeHeader(senderName))} <${sanitizeHeader(senderEmail)}>`,
-    `To: ${sanitizeHeader(recipient.email)}`,
-    `Reply-To: ${sanitizeHeader(replyTo || senderEmail)}`,
-    `Subject: ${encodeHeader(sanitizeHeader(subject))}`,
-    'MIME-Version: 1.0',
-    `Content-Type: multipart/alternative; boundary="${boundary}"`
-  ];
-
-  if (unsubscribeEmail && EMAIL_RE.test(unsubscribeEmail)) {
-    headers.push(`List-Unsubscribe: <mailto:${unsubscribeEmail}?subject=Berhenti%20PMB>`);
-  }
-
-  const message = [
-    ...headers,
-    '',
-    `--${boundary}`,
-    'Content-Type: text/plain; charset="UTF-8"',
-    'Content-Transfer-Encoding: 8bit',
-    '',
-    text,
-    '',
-    `--${boundary}`,
-    'Content-Type: text/html; charset="UTF-8"',
-    'Content-Transfer-Encoding: 8bit',
-    '',
-    html,
-    '',
-    `--${boundary}--`,
-    ''
-  ].join('\r\n');
-
-  return base64Url(message);
-}
-
 function requireEnv(name) {
   const value = process.env[name];
   if (!value) throw new Error(`Environment variable ${name} wajib diisi.`);
   return value;
 }
 
-function createGmailClient() {
-  const mode = (process.env.GOOGLE_AUTH_MODE || 'oauth2').toLowerCase();
-  if (mode === 'oauth2') {
-    const auth = new google.auth.OAuth2(
-      requireEnv('GMAIL_CLIENT_ID'),
-      requireEnv('GMAIL_CLIENT_SECRET')
-    );
-    auth.setCredentials({ refresh_token: requireEnv('GMAIL_REFRESH_TOKEN') });
-    return google.gmail({ version: 'v1', auth });
+function envBoolean(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined || value === '') return fallback;
+  return String(value).toLowerCase() === 'true';
+}
+
+function createSmtpTransport() {
+  const host = requireEnv('SMTP_HOST');
+  const port = Number(process.env.SMTP_PORT || 587);
+  const username = requireEnv('SMTP_USERNAME');
+  let password = requireEnv('SMTP_PASSWORD');
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('SMTP_PORT tidak valid.');
   }
 
-  if (mode === 'service_account') {
-    let credentials;
-    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-      credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    } else {
-      const keyFile = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY_FILE');
-      credentials = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
-    }
-    const subject = process.env.GMAIL_IMPERSONATED_USER || requireEnv('SENDER_EMAIL');
-    const auth = new google.auth.JWT({
-      email: credentials.client_email,
-      key: credentials.private_key,
-      scopes: ['https://www.googleapis.com/auth/gmail.send'],
-      subject
-    });
-    return google.gmail({ version: 'v1', auth });
+  // Google menampilkan App Password dalam grup empat karakter. Bila spasi ikut
+  // tersalin ke .env, buang spasinya hanya untuk Gmail/Google Workspace SMTP.
+  if (/(^|\.)gmail\.com$/i.test(host)) {
+    password = password.replace(/\s+/g, '');
   }
 
-  throw new Error('GOOGLE_AUTH_MODE harus oauth2 atau service_account.');
+  const secure = envBoolean('SMTP_SECURE', port === 465);
+  const requireTLS = envBoolean('SMTP_REQUIRE_TLS', port === 587);
+
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    requireTLS,
+    auth: {
+      user: username,
+      pass: password
+    },
+    tls: {
+      minVersion: 'TLSv1.2'
+    },
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 15000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30000)
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -261,8 +219,9 @@ async function main() {
     throw new Error(`Command tidak dikenal: ${command}. Gunakan validate, preview, atau send.`);
   }
 
-  const senderEmail = requireEnv('SENDER_EMAIL');
-  if (!EMAIL_RE.test(senderEmail)) throw new Error('SENDER_EMAIL tidak valid.');
+  const smtpUsername = requireEnv('SMTP_USERNAME');
+  const senderEmail = process.env.SENDER_EMAIL || smtpUsername;
+  if (!EMAIL_RE.test(senderEmail)) throw new Error('SENDER_EMAIL/SMTP_USERNAME tidak valid.');
   const senderName = process.env.SENDER_NAME || 'PMB Institut Teknologi Tangerang Selatan';
   const replyTo = process.env.REPLY_TO_EMAIL || senderEmail;
   const unsubscribeEmail = process.env.UNSUBSCRIBE_EMAIL || replyTo;
@@ -274,6 +233,10 @@ async function main() {
   const suppression = loadSuppression(process.env.SUPPRESSION_FILE || './data/suppression-list.csv');
   const sentLogFile = process.env.SENT_LOG_FILE || './logs/sent.jsonl';
   const alreadySent = hasArg('--resend') ? new Set() : loadSent(sentLogFile);
+
+  if (senderEmail.toLowerCase() !== smtpUsername.toLowerCase()) {
+    console.warn(`WARNING: SENDER_EMAIL (${senderEmail}) berbeda dari SMTP_USERNAME (${smtpUsername}). Pastikan alamat tersebut adalah alias pengirim yang diizinkan di Google Workspace.`);
+  }
 
   let queue = analysis.valid.filter((recipient) => !suppression.has(recipient.email.toLowerCase()));
   queue = queue.filter((recipient) => !alreadySent.has(recipient.email.toLowerCase()));
@@ -300,36 +263,46 @@ async function main() {
     throw new Error('Live blast diblokir. Set CONFIRM_SEND=YES atau tambahkan --confirm setelah recipient dan preview diperiksa.');
   }
 
-  const gmail = createGmailClient();
+  const transporter = createSmtpTransport();
+  console.log('\nMemeriksa koneksi SMTP...');
+  await transporter.verify();
+  console.log('SMTP authentication berhasil.');
+
   let success = 0;
   let failed = 0;
 
   for (let i = 0; i < queue.length; i += 1) {
     const recipient = queue[i];
     const { html, text } = renderEmail(recipient, campaign);
-    const raw = buildRawMessage({
-      recipient,
-      subject,
-      html,
-      text,
-      senderName,
-      senderEmail,
-      replyTo,
-      unsubscribeEmail
-    });
+
+    const headers = {};
+    if (unsubscribeEmail && EMAIL_RE.test(unsubscribeEmail)) {
+      headers['List-Unsubscribe'] = `<mailto:${unsubscribeEmail}?subject=Berhenti%20PMB>`;
+    }
 
     try {
-      const response = await gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw }
+      const info = await transporter.sendMail({
+        from: {
+          name: senderName,
+          address: senderEmail
+        },
+        to: recipient.email,
+        replyTo,
+        subject,
+        text,
+        html,
+        headers
       });
+
       success += 1;
       appendLog(sentLogFile, {
         timestamp: new Date().toISOString(),
         status: 'sent',
         email: recipient.email.toLowerCase(),
         applicantId: recipient.applicantId,
-        gmailMessageId: response.data.id || null
+        smtpMessageId: info.messageId || null,
+        accepted: info.accepted || [],
+        rejected: info.rejected || []
       });
       console.log(`[${i + 1}/${queue.length}] SENT ${recipient.email}`);
     } catch (error) {
@@ -339,7 +312,9 @@ async function main() {
         status: 'failed',
         email: recipient.email.toLowerCase(),
         applicantId: recipient.applicantId,
-        error: error?.message || String(error)
+        error: error?.message || String(error),
+        code: error?.code || null,
+        responseCode: error?.responseCode || null
       });
       console.error(`[${i + 1}/${queue.length}] FAILED ${recipient.email}: ${error?.message || error}`);
     }
@@ -347,6 +322,7 @@ async function main() {
     if (i < queue.length - 1 && delayMs > 0) await sleep(delayMs);
   }
 
+  transporter.close();
   console.log(`\nSelesai. Sent: ${success}, Failed: ${failed}. Log: ${sentLogFile}`);
   if (failed) process.exitCode = 2;
 }
